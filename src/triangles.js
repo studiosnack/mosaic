@@ -2,6 +2,8 @@ import * as React from 'react';
 
 import {produce, current} from 'immer';
 
+// this converts local pixel values to inches
+const SCALING = 72;
 
 function shuffle(arr) {
   var i = arr.length,
@@ -19,6 +21,8 @@ const range = (els) => Array.from(Array(els), (_el, idx) => idx);
 
 const mosaicReducer = (state, action) => {
   switch (action.type) {
+    case 'ingest_state':
+      return action.payload;
     case 'set_current_color':
       return produce(state, (draft) => {
         draft.selectedColor = action.payload.color;
@@ -38,6 +42,14 @@ const mosaicReducer = (state, action) => {
         const nextMosaic = action.payload.updater(draft.mosaic);
         draft.mosaic = nextMosaic;
       });
+    case 'set_mosaic_width':
+      return produce(state, draft => {
+        draft.widthIn = action.payload
+      })
+    case 'set_mosaic_height':
+      return produce(state, draft => {
+        draft.heightIn = action.payload
+      })
     case 'update_module': {
       const {position, data} = action.payload;
       return produce(state, (draft) => {
@@ -82,20 +94,32 @@ const mosaicReducer = (state, action) => {
     }
     case 'set_tile_size': {
       return produce(state, (draft) => {
-        // console.log(action.payload, typeof action.payload)
         draft.tileWidthIn = Number(action.payload);
         draft.yOffset = selectYOffset(current(draft));
+        draft.xOffset = selectXOffset(current(draft));
       });
     }
     case 'set_spacing': {
       return produce(state, (draft) => {
         draft.spacingIn = Number(action.payload) / 16;
         draft.yOffset = selectYOffset(current(draft));
+        draft.xOffset = selectXOffset(current(draft));
       });
     }
     case 'set_keypress': {
       return produce(state, (draft) => {
         draft.currentKey = action.payload;
+      });
+    }
+    case 'toggle_anchor': {
+      return produce(state, (draft) => {
+        if (action.payload === 'x') {
+          draft.anchorX = draft.anchorX === 'left' ? 'right' : 'left';
+        } else {
+          draft.anchorY = draft.anchorY === 'top' ? 'bottom' : 'top';
+        }
+        draft.yOffset = selectYOffset(current(draft));
+        draft.xOffset = selectXOffset(current(draft));
       });
     }
   }
@@ -111,67 +135,140 @@ const initMosaicFromState = (statelike) => {
   const {widthIn, heightIn, tileWidthIn, anchorY, anchorX, spacingIn} =
     statelike;
 
-  const moduleWidth = 16 * tileWidthIn;
-  const spacing = 16 * spacingIn;
+  const moduleWidth = tileWidthIn;
+  const spacing = spacingIn;
 
   const actualModuleWidth = moduleWidth + 2 * spacing;
   const actualModuleHeight = moduleWidth + spacing;
-  const horizontalModules = Math.ceil((widthIn * 16) / actualModuleWidth);
-  const verticalModules = Math.ceil((heightIn * 16) / actualModuleHeight);
+  const horizontalModules = Math.ceil(widthIn / actualModuleWidth);
+  const verticalModules = Math.ceil(heightIn / actualModuleHeight);
 
   const yOffset =
     anchorY === 'bottom'
       ? // we add the extra spacing here so that the bottom of the module is flush
         // with the bottom of the svg
-        heightIn * 16 - verticalModules * actualModuleHeight
+        (heightIn - verticalModules * actualModuleHeight) * SCALING
+      : 0;
+
+  const xOffset =
+    anchorX === 'right'
+      ? // same idea as above
+        (widthIn - horizontalModules * actualModuleWidth) * SCALING
       : 0;
 
   const mosaic = range(verticalModules).map(() =>
     range(horizontalModules).map(() => ({colors: ['tusk', 'tusk']})),
   );
-  return {...statelike, mosaic, yOffset};
+  return {...statelike, mosaic, yOffset, xOffset};
 };
 
+const selectLogicalModuleWidth = (state) => {
+  return state.tileWidthIn + 2 * state.spacingIn;
+};
+/**
+ * return the display module width in svg dimensions
+ */
 const selectActualModuleWidth = (state) => {
-  const moduleWidth = 16 * state.tileWidthIn;
-  const spacing = 16 * state.spacingIn;
-  const actualModuleWidth = moduleWidth + 2 * spacing;
+  // this is because for a double triangle module we have the interior grout and the exterior grout
+  const actualModuleWidth = selectLogicalModuleWidth(state) * SCALING;
   return actualModuleWidth;
 };
+
+const selectLogicalModuleHeight = (state) => {
+  return state.tileWidthIn + state.spacingIn;
+};
+/**
+ * return the display module height in svg dimensions
+ */
 const selectActualModuleHeight = (state) => {
-  const moduleWidth = 16 * state.tileWidthIn;
-  const spacing = 16 * state.spacingIn;
-  const actualModuleHeight = moduleWidth + spacing;
+  const actualModuleHeight = selectLogicalModuleHeight(state) * SCALING;
   return actualModuleHeight;
 };
 
+/**
+ * see how many modules fit vertically in an area
+ */
 const selectVerticalModulesForArea = (state) => {
-  const actualModuleHeight = selectActualModuleHeight(state);
-  return Math.ceil((state.heightIn * 16) / actualModuleHeight);
+  // subtract spacing at the end to ignore the last amount of grout at the bottom
+  return Math.ceil(
+    state.heightIn / selectLogicalModuleHeight(state) - state.spacingIn,
+  );
+};
+
+const selectHorizontalModulesForArea = (state) => {
+  return Math.ceil(
+    state.widthIn / selectLogicalModuleWidth(state) - state.spacingIn,
+  );
 };
 
 const selectYOffset = (state) => {
   const verticalModules = selectVerticalModulesForArea(state);
-  const actualModuleHeight = selectActualModuleHeight(state);
+  const overflowAmount =
+    state.heightIn - verticalModules * (state.spacingIn + state.tileWidthIn);
+
   return state.anchorY === 'bottom'
-    ? state.heightIn * 16 -
-        verticalModules * actualModuleHeight +
-        state.spacingIn * 16
+    ? (overflowAmount + state.spacingIn) * SCALING
+    : 0;
+};
+const selectXOffset = (state) => {
+  const horizontalModules = selectHorizontalModulesForArea(state);
+  const overflowAmount =
+    state.widthIn -
+    horizontalModules * (state.spacingIn * 2 + state.tileWidthIn);
+  return state.anchorX === 'right'
+    ? (overflowAmount + state.spacingIn) * SCALING
     : 0;
 };
 
-const selectSpacing = (state) => 16 * state.spacingIn;
+const tallyTiles = (state) => {
+  return state.mosaic.reduce((rowAcc, row, y_p) => {
+    const rowTally = row.reduce((moduleAcc, tileModule, x_p) => {
+      const maskedRegions = [
+        [
+          [0+state.xOffset, 0+state.yOffset],
+          [58*SCALING, 8.3*SCALING],
+        ],
+        [
+          [88*SCALING, 0+state.yOffset],
+          [108.5*SCALING, 8.3*SCALING],
+        ],
+      ];
+      const isMaskedModule = maskedRegions.some((region) => {
+        // if (y_p ===0)
+        // console.log(x_p, y_p,selectDimensionsForModule(state, x_p, y_p), region)
+        if (rectInRect(selectDimensionsForModule(state, x_p, y_p), region)) {
+          console.log(x_p, y_p, region)
+        } //else
+        return rectInRect(selectDimensionsForModule(state, x_p, y_p), region);
+      });
+
+      if (!isMaskedModule) {
+        tileModule.colors.forEach((color) => {
+          moduleAcc[color] = (moduleAcc[color] ?? 0) + 1;
+        });
+      }
+      return moduleAcc;
+    }, {});
+    Object.entries(rowTally).forEach(([color, qty]) => {
+      rowAcc[color] = (rowAcc[color] ?? 0) + qty;
+    });
+    return rowAcc;
+  }, {});
+};
+
+const selectSpacing = (state) => SCALING * state.spacingIn;
 
 export const TriangleApp = () => {
   const initialState = {
     selectedColor: 'ember',
-    widthIn: 9 * 12 + 1,
-    heightIn: 24 + 4.5,
+    widthIn: 9 * 12 + 0.5,
+    heightIn: 2 * 12 + 4.5,
     tileWidthIn: 4,
     spacingIn: 1 / 8,
     anchorY: 'bottom',
-    anchorX: 'left;',
+    anchorX: 'right',
     yOffset: 0,
+    xOffset: 0,
     mosaic: [[]],
     colors: {
       tusk: '#d1d1d1',
@@ -194,24 +291,42 @@ export const TriangleApp = () => {
   const handleKeyPress = (evt) => {
     dispatch({type: 'set_keypress', payload: evt.key});
   };
-  const clearKeyPress = evt => dispatch({type: 'set_keypress', payload: null});
+  const clearKeyPress = (evt) =>
+    dispatch({type: 'set_keypress', payload: null});
 
   React.useEffect(() => {
     window.addEventListener('keydown', handleKeyPress);
-    window.addEventListener('keyup', clearKeyPress)
-    return () => {window.removeEventListener('keydown', handleKeyPress);
-    window.removeEventListener('keyup', clearKeyPress)}
+    window.addEventListener('keyup', clearKeyPress);
+    return () => {
+      window.removeEventListener('keydown', handleKeyPress);
+      window.removeEventListener('keyup', clearKeyPress);
+    };
   }, []);
+
+  const [isDragging] = useDropHandler(async (file) => {
+    if (file.type !== 'application/json') {
+      return;
+    }
+    let content;
+    try {
+      const text = await file.text();
+      content = JSON.parse(text);
+    } catch (err) {
+      console.error('not valid json');
+      return;
+    }
+    dispatch({type: 'ingest_state', payload: content});
+  });
 
   return (
     <MosaicContext.Provider value={{state, dispatch}}>
       <div>
         <Mosaic
           ref={mosaicRef}
-          height={state.heightIn * 16}
-          width={state.widthIn * 16}
-          moduleWidth={state.tileWidth * 16}
-          spacing={state.spacingIn * 16}
+          height={state.heightIn * SCALING}
+          width={state.widthIn * SCALING}
+          moduleWidth={state.tileWidthIn * SCALING}
+          spacing={state.spacingIn * SCALING}
         />
       </div>
       <ColorWells
@@ -235,7 +350,9 @@ export const TriangleApp = () => {
             {type: 'image/svg+xml;charset=utf-8'},
           );
         }}
-      />
+      >
+        download mosaic as svg
+      </DownloadButton>
       <div style={{display: 'flex'}}>
         <div>
           <label>
@@ -255,6 +372,21 @@ export const TriangleApp = () => {
             />
             4"
           </label>
+          <div>
+          <label>width (inches)
+                        <input
+              type="number"
+              min="0"
+              value={`${state.widthIn}`}
+              onChange={(evt) => {
+                dispatch({
+                  type: 'set_mosaic_width',
+                  payload: evt.currentTarget.value,
+                });
+              }}
+            /></label>
+
+          </div>
         </div>
 
         <div style={{marginLeft: 20}}>
@@ -266,9 +398,10 @@ export const TriangleApp = () => {
             /{(state.spacingIn * 16) % 2 === 0 ? '8' : '16'}" <br /> 1/16"
             <input
               type="range"
+              // goes from 1/16 -> 3/8
               min="1"
               max="6"
-              value={`${state.spacingIn * 16}`}
+              value={state.spacingIn * 16}
               onChange={(evt) => {
                 dispatch({
                   type: 'set_spacing',
@@ -278,18 +411,68 @@ export const TriangleApp = () => {
             />
             3/8"
           </label>
+                    <div>
+          <label>height (inches)
+                        <input
+              type="number"
+              min="0"
+              value={`${state.heightIn}`}
+              onChange={(evt) => {
+                dispatch({
+                  type: 'set_mosaic_height',
+                  payload: evt.currentTarget.value,
+                });
+              }}
+            /></label>
+
+          </div>
+
+        </div>
+        <div style={{marginLeft: 20}}>
+          <label>
+            anchored {state.anchorX}
+            <input
+              type="checkbox"
+              checked={state.anchorX === 'left'}
+              onChange={(evt) =>
+                dispatch({type: 'toggle_anchor', payload: 'x'})
+              }
+            />
+          </label>
+          <label>
+            anchored {state.anchorY}
+            <input
+              type="checkbox"
+              checked={state.anchorY === 'bottom'}
+              onChange={(evt) =>
+                dispatch({type: 'toggle_anchor', payload: 'y'})
+              }
+            />
+          </label>
+        </div>
+        <div style={{marginLeft: 20}}>
+          <pre>{JSON.stringify(tallyTiles(state), undefined, 2)}</pre>
         </div>
       </div>
+
       <p>click or drag while holding shift, to flip the colors in a module</p>
       <p>
         click or drag while holding alt to rotate a module's orientation 90
         degrees
       </p>
+      <DownloadButton
+        filename="mosaicstate.json"
+        getBlob={() => {
+          return new Blob([JSON.stringify(state)], {type: 'application/json'});
+        }}
+      >
+        export state
+      </DownloadButton>
     </MosaicContext.Provider>
   );
 };
 
-function DownloadButton({getBlob, filename}) {
+function DownloadButton({getBlob, filename, children}) {
   const linkRef = React.createRef();
   const [linkUrl, setLinkUrl] = React.useState();
 
@@ -308,16 +491,13 @@ function DownloadButton({getBlob, filename}) {
           // linkRef.current?.click()
         }}
       >
-        download
+        {children ?? 'download'}
       </button>
       <a
         ref={linkRef}
         style={{display: 'none'}}
         href={linkUrl}
         download={filename}
-        onClick={() => {
-          console.log('clicked!');
-        }}
       >
         hidden link
       </a>
@@ -328,9 +508,22 @@ function DownloadButton({getBlob, filename}) {
 const MosaicContext = React.createContext();
 
 function ColorWells({colors, selectedColor, onChange}) {
+  const colorEntries = Object.entries(colors);
+  const listenForColorChanges = (evt) => {
+    if (
+      range(colorEntries.length)
+        .map((idx) => `${idx + 1}`)
+        .includes(evt.key)
+    ) {
+      onChange(colorEntries[Number(evt.key) - 1][0]);
+    }
+  };
+  React.useEffect(() => {
+    document.addEventListener('keyup', listenForColorChanges);
+  }, []);
   return (
     <div style={{display: 'flex'}}>
-      {Object.entries(colors).map(([name, value]) => {
+      {colorEntries.map(([name, value]) => {
         return (
           <div
             key={name}
@@ -355,6 +548,32 @@ function ColorWells({colors, selectedColor, onChange}) {
 
 function selectColorFromName(state, name) {
   return state.colors[name];
+}
+
+function rectInRect(needle, haystack) {
+  // returns true if needle is entirely enclosed within
+  const contained =
+    haystack[0][0] <= needle[0][0] &&
+    needle[1][0] <= haystack[1][0] &&
+
+    haystack[0][1] <= needle[0][1] &&
+    needle[1][1] <= haystack[1][1]
+  return contained;
+}
+
+function selectDimensionsForModule(state, xIdx, yIdx) {
+  // returns bounding box for a module at given x/y index
+  const actualModuleWidth = selectActualModuleWidth(state);
+  const actualModuleHeight = selectActualModuleHeight(state);
+
+  const x = xIdx * actualModuleWidth + (state.xOffset ?? 0);
+  const y = yIdx * actualModuleHeight + (state.yOffset ?? 0);
+
+  const bounds = [
+    [x, y],
+    [x + actualModuleWidth, y + actualModuleHeight],
+  ];
+  return bounds;
 }
 
 function Module({
@@ -390,11 +609,23 @@ function Module({
         return;
       }
     }
-    if (state.currentKey === 'z') {
-      dispatch
-      dispatch({type: 'set_module_orientation', payload: {position, orientation: 'sw'}});
+    if (['z', ';'].includes(state.currentKey)) {
+      dispatch;
+      dispatch({
+        type: 'set_module_orientation',
+        payload: {position, orientation: 'sw'},
+      });
       return;
     }
+    if (['x', 'q'].includes(state.currentKey)) {
+      dispatch;
+      dispatch({
+        type: 'set_module_orientation',
+        payload: {position, orientation: 'nw'},
+      });
+      return;
+    }
+
     if (evt.altKey) {
       dispatch({type: 'toggle_module_orientation', payload: {position}});
     }
@@ -415,7 +646,8 @@ function Module({
               `}
             fill={selectColorFromName(state, colors[0]) ?? 'green'}
             stroke="white"
-            strokeWidth={spacing}
+            style={{paintOrder: 'stroke'}}
+            strokeWidth={0}
             onClick={handleTriangleClick(0)}
             onMouseEnter={handleTriangleClick(0)}
           ></polygon>
@@ -426,7 +658,8 @@ function Module({
               ${x + spacing},${y + width}
               `}
             stroke="white"
-            strokeWidth={spacing}
+            style={{paintOrder: 'stroke'}}
+            strokeWidth={0}
             fill={selectColorFromName(state, colors[1]) ?? 'pink'}
             onClick={handleTriangleClick(1)}
             onMouseEnter={handleTriangleClick(1)}
@@ -442,7 +675,8 @@ function Module({
               `}
             fill={selectColorFromName(state, colors[0]) ?? 'green'}
             stroke="white"
-            strokeWidth={spacing}
+            style={{paintOrder: 'stroke'}}
+            strokeWidth={0}
             onClick={handleTriangleClick(0)}
             onMouseEnter={handleTriangleClick(0)}
           ></polygon>
@@ -453,7 +687,8 @@ function Module({
               ${x + width + spacing},${y + width}
               `}
             stroke="white"
-            strokeWidth={spacing}
+            style={{paintOrder: 'stroke'}}
+            strokeWidth={0}
             fill={selectColorFromName(state, colors[1]) ?? 'pink'}
             onClick={handleTriangleClick(1)}
             onMouseEnter={handleTriangleClick(1)}
@@ -466,7 +701,7 @@ function Module({
 
 const Mosaic = React.forwardRef(RawMosaic);
 
-function RawMosaic({width, height, moduleWidth, spacing}, ref) {
+function RawMosaic({width, height}, ref) {
   const {state, dispatch} = React.useContext(MosaicContext);
 
   const {mosaic: mosaicData} = state;
@@ -488,28 +723,167 @@ function RawMosaic({width, height, moduleWidth, spacing}, ref) {
   const actualModuleWidth = selectActualModuleWidth(state);
   const actualModuleHeight = selectActualModuleHeight(state);
 
+  const maskPointsInches = [
+    [0, 10.5],
+    [0, 28.5],
+    [108.5, 28.5],
+    [108.5, 10.5],
+    [89, 10.5],
+    [89, 0],
+    [59, 0],
+    [59, 10.5],
+    [0, 10.5],
+  ];
+
+  const maskedRegions = [
+    [
+      [0, 0],
+      [58, 8],
+    ],
+    [
+      [88, 0],
+      [108.5, 8],
+    ],
+  ];
+  const semiMaskedRegions = [
+    [
+      [0, 7],
+      [58, 10.5],
+    ],
+    // [
+    //   [58, 0],
+    //   [108.5, 1],
+    // ],
+    [
+      [88, 7],
+      [108.5, 10.5],
+    ],
+  ];
+
   return (
-    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} ref={ref}>
-      {mosaicData.map((row, y) => {
-        return row.map((cell, x) => {
+    <svg
+      viewBox={`0 0 ${width} ${height}`}
+      style={{aspectRatio: width / height, width: 'calc(100vw - 20px)'}}
+      ref={ref}
+    >
+      <mask id="kitchen">
+        <rect x={0} y={0} width={width} height={height} fill="#fff" />
+        {maskedRegions.map((bbox, idx) => {
           return (
-            <Module
-              key={`${x},${y}`}
-              onChange={handleMosaicChange(x, y)}
-              x={x * actualModuleWidth}
-              y={y * actualModuleHeight + (state.yOffset ?? 0)}
-              position={{x, y}}
-              spacing={selectSpacing(state)}
-              width={state.tileWidthIn * 16}
-              colors={[
-                mosaicData[y][x]?.colors?.[0],
-                mosaicData[y][x]?.colors?.[1],
-              ]}
-              orientation={mosaicData[y][x]?.orientation}
+            <rect
+            key={`${idx}masked`}
+              x={SCALING * bbox[0][0]}
+              y={SCALING * bbox[0][1]}
+              width={SCALING * (bbox[1][0] - bbox[0][0])}
+              height={SCALING * (bbox[1][1] - bbox[0][1])}
+              fill="black"
             />
           );
-        });
-      })}
+        })}
+{/*        <polygon
+          points={maskPointsInches
+            .map(([x, y]) => `${x * SCALING},${y * SCALING}`)
+            .join(', ')}
+          fill="#fff"
+        />
+*/}      </mask>
+      <g mask="url('#kitchen')">
+        {mosaicData.map((row, y) => {
+          return row.map((cell, x) => {
+            return (
+              <Module
+                key={`${x},${y}`}
+                onChange={handleMosaicChange(x, y)}
+                x={x * actualModuleWidth + (state.xOffset ?? 0)}
+                y={y * actualModuleHeight + (state.yOffset ?? 0)}
+                position={{x, y}}
+                spacing={selectSpacing(state)}
+                width={state.tileWidthIn * SCALING}
+                colors={[
+                  mosaicData[y][x]?.colors?.[0],
+                  mosaicData[y][x]?.colors?.[1],
+                ]}
+                orientation={mosaicData[y][x]?.orientation}
+              />
+            );
+          });
+        })}
+      </g>
+      <g style={{pointerEvents: 'none'}}>
+        {false && maskedRegions.map((bbox, idx) => {
+          return (
+            <rect
+            key={`${idx}masked`}
+              x={SCALING * bbox[0][0]}
+              y={SCALING * bbox[0][1]}
+              width={SCALING * (bbox[1][0] - bbox[0][0])}
+              height={SCALING * (bbox[1][1] - bbox[0][1])}
+              fill="white"
+            />
+          );
+        })}
+        {false && semiMaskedRegions.map((bbox, idx) => {
+          return (
+            <rect
+            key={`${idx}semi`}
+              x={SCALING * bbox[0][0]}
+              y={SCALING * bbox[0][1]}
+              width={SCALING * (bbox[1][0] - bbox[0][0])}
+              height={SCALING * (bbox[1][1] - bbox[0][1])}
+              fill="rgba(255,255,255,.3)"
+            />
+          );
+        })}
+      </g>
     </svg>
   );
+}
+
+function useDropHandler(onDropFile, el) {
+  const [isDragging, setIsDragging] = React.useState();
+
+  const dragHandler = (evt) => {
+    evt.preventDefault();
+    setIsDragging(true);
+  };
+  const dragEndHandler = (evt) => {
+    evt.preventDefault();
+    setIsDragging(false);
+  };
+
+  const dropHandler = (evt) => {
+    evt.preventDefault();
+    if (evt.dataTransfer.items) {
+      [...evt.dataTransfer.items].forEach((item, i) => {
+        if (item.kind === 'file') {
+          const file = item.getAsFile();
+          // console.log(`doing something with file ${i}: ${file.name}`);
+          onDropFile?.(file);
+        }
+      });
+    } else {
+      [...evt.dataTransfer.files].forEach((file, i) => {
+        // console.log(`doing something with file ${i}: ${file.name}`);
+        onDropFile?.(file);
+      });
+    }
+    setIsDragging(false);
+  };
+
+  React.useEffect(() => {
+    let target = el ? el : document;
+
+    target.addEventListener('dragover', dragHandler);
+    target.addEventListener('drop', dropHandler);
+    target.addEventListener('dragend', dragEndHandler);
+    target.addEventListener('dragleave', dragEndHandler);
+    return () => {
+      target.removeEventListener('dragover', dragHandler);
+      target.removeEventListener('drop', dropHandler);
+      target.removeEventListener('dragend', dragEndHandler);
+      target.removeEventListener('dragleave', dragEndHandler);
+    };
+  }, []);
+
+  return [isDragging];
 }
